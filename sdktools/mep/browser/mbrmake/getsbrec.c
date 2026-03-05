@@ -1,5 +1,4 @@
 //
-//
 // GETSBREC.C -	Reads records from the .SBR file and stores the fields
 //		in the appropriate r_.. buffers.
 //
@@ -33,24 +32,35 @@ static char sbrBuf[MY_BUF_SIZE + 1];
 static char *pchBuf;
 static int cchBuf;
 
-#define GetByte(X)					\
-{							\
-    if (!cchBuf) {					\
-	cchBuf = read(fhCur, sbrBuf, MY_BUF_SIZE);	\
-	sbrBuf[cchBuf] = 0;				\
-	pchBuf = sbrBuf;				\
-							\
-	if (cchBuf == 0)				\
-	    SBRCorrupt("premature EOF");		\
-    }							\
-							\
-    cchBuf--;						\
-    (X) = (unsigned char)*pchBuf++;			\
+// Вспомогательная функция для безопасного чтения из файла в буфер
+static int FillSbrBuffer() 
+{
+    cchBuf = read(fhCur, sbrBuf, MY_BUF_SIZE);
+    
+    // Проверка на ошибку чтения (-1)
+    if (cchBuf < 0) {
+        SBRCorrupt("file read error");
+        cchBuf = 0; // На случай если SBRCorrupt вернет управление
+    }
+    
+    sbrBuf[cchBuf] = 0;
+    pchBuf = sbrBuf;
+    return cchBuf;
+}
+
+#define GetByte(X)					            \
+{							                    \
+    if (cchBuf <= 0) {					        \
+        if (FillSbrBuffer() == 0)               \
+            SBRCorrupt("premature EOF");		\
+    }							                \
+							                    \
+    cchBuf--;						            \
+    (X) = (unsigned char)*pchBuf++;			    \
 }
 
 #define GetWord(X)					\
 {							\
-							\
     GetByte(((char *)&(X))[0]);				\
     GetByte(((char *)&(X))[1]);				\
 }
@@ -58,108 +68,98 @@ static int cchBuf;
 void
 GetStr(char *buf)
 // get null terminated string from current .sbr file
-//
 {
     register int l;
 
     for (;;) {
-	// there is always a NULL after the real buffer
-	l = strlen(pchBuf);
+        // pchBuf всегда указывает на валидную строку, так как FillSbrBuffer 
+        // гарантирует sbrBuf[cchBuf] = 0
+        l = strlen(pchBuf);
 
-	if (l++ < cchBuf) {
-	    strcpy(buf, pchBuf);
-	    cchBuf -= l;
-	    pchBuf += l;
-	    return;
-	}
+        if (l < cchBuf) { // Строка целиком в буфере (включая \0)
+            strcpy(buf, pchBuf);
+            cchBuf -= (l + 1);
+            pchBuf += (l + 1);
+            return;
+        }
 
-	memcpy(buf, pchBuf, cchBuf);
-	buf += cchBuf;
+        // Строка не поместилась или \0 вне текущего окна буфера
+        memcpy(buf, pchBuf, cchBuf);
+        buf += cchBuf;
 
-	cchBuf = read(fhCur, sbrBuf, MY_BUF_SIZE);
-	sbrBuf[cchBuf] = 0;
-	pchBuf = sbrBuf;
-
-	if (cchBuf == 0)
-	    SBRCorrupt("premature EOF");
+        if (FillSbrBuffer() == 0)
+            SBRCorrupt("premature EOF");
     }
 }
 	
 BYTE
 GetSBRRec()
 // read the next record from the current .sbr file
-//
 {
-    static fFoundHeader;
-    BYTE   col;
+    static int fFoundHeader = 0; // Инициализируем явно
+    BYTE col;
 
-    // read rectype, check for EOF as we go
-	
-
-    if (!cchBuf) {
-	cchBuf = read(fhCur, sbrBuf, MY_BUF_SIZE);
-	sbrBuf[cchBuf] = 0;
-	pchBuf = sbrBuf;
-
-	if (cchBuf == 0) {
-	    fFoundHeader = 0;	// this is in case we are reinitialized
-	    return S_EOF;
-	}
+    // Проверяем наличие данных для типа записи
+    if (cchBuf <= 0) {
+        if (FillSbrBuffer() == 0) {
+            fFoundHeader = 0;
+            return S_EOF;
+        }
     }
     
     cchBuf--;
     r_rectyp = (unsigned char)*pchBuf++;
 
     switch(r_rectyp) {
-	case SBR_REC_HEADER:
-	    if (fFoundHeader)
-		SBRCorrupt("Multiple Headers");
+        case SBR_REC_HEADER:
+            if (fFoundHeader)
+                SBRCorrupt("Multiple Headers");
 
-	    fFoundHeader = 1;
-	    GetByte(r_majv);
-	    GetByte(r_minv);
-	    GetByte(r_lang);
-	    GetByte(r_fcol);
+            fFoundHeader = 1;
+            GetByte(r_majv);
+            GetByte(r_minv);
+            GetByte(r_lang);
+            GetByte(r_fcol);
 
-	    if (r_majv != 1 || r_minv != 1)
-		break;
+            if (r_majv != 1 || r_minv != 1)
+                break;
 
-	    GetStr (r_cwd);
-	    break;
+            GetStr (r_cwd);
+            break;
 
-	case SBR_REC_MODULE:
-	    GetStr (r_bname);
-	    break;
+        case SBR_REC_MODULE:
+            GetStr (r_bname);
+            break;
 
-	case SBR_REC_LINDEF:
-	    GetWord (r_lineno);
-	    if (r_lineno)
-		r_lineno--;
-	    break;
+        case SBR_REC_LINDEF:
+            GetWord (r_lineno);
+            if (r_lineno)
+                r_lineno--;
+            break;
 
-	case SBR_REC_SYMDEF:
-	    GetWord (r_attrib);
-	    GetWord (r_ordinal);
-	    if (r_fcol) GetByte (col);
-	    GetStr (r_bname);
-	    break;
+        case SBR_REC_SYMDEF:
+            GetWord (r_attrib);
+            GetWord (r_ordinal);
+            if (r_fcol) GetByte (col);
+            GetStr (r_bname);
+            break;
 
-	case SBR_REC_OWNER:
-	    GetWord (r_ordinal);
-	    break;
+        case SBR_REC_OWNER:
+            GetWord (r_ordinal);
+            break;
 
-	case SBR_REC_SYMREFUSE:
-	case SBR_REC_SYMREFSET:
-	    GetWord (r_ordinal);
-	    if (r_fcol) GetByte (col);
-	    break;
+        case SBR_REC_SYMREFUSE:
+        case SBR_REC_SYMREFSET:
+            GetWord (r_ordinal);
+            if (r_fcol) GetByte (col);
+            break;
 
-	case SBR_REC_MACROBEG:
-	case SBR_REC_MACROEND:
-	case SBR_REC_BLKBEG:
-	case SBR_REC_BLKEND:
-	case SBR_REC_MODEND:
-	    break;
+        case SBR_REC_MACROBEG:
+        case SBR_REC_MACROEND:
+        case SBR_REC_BLKBEG:
+        case SBR_REC_BLKEND:
+        case SBR_REC_MODEND:
+            break;
     }
     return (r_rectyp);
 }
